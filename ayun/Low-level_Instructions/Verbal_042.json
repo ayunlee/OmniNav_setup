@@ -1,0 +1,8 @@
+{
+    "Goal": "TOILET(M)",
+    "StartTime": 8.0,
+    "Instruction": "Walk straight ahead across the blue carpeted floor, passing the row of desks with green partitions on your right. Continue straight, keeping the staircase and the white spherical chairs with red and black interiors on your left. Keep walking past the long white desks with green chairs, also on your left. Stop in front of the dark black wall that displays white TOILET(M) text. This is your destination.",
+    "Mission": "SocialACT_054",
+    "EndTime": 77.0,
+    "Stopped": 0
+}

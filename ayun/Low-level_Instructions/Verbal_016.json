@@ -1,0 +1,8 @@
+{
+    "Goal": "White car",
+    "StartTime": 190.0,
+    "Instruction": "Walk straight along the reddish paved path, keeping the trees on your left and the road on your right. Pass a signpost with multiple directional arrows. Continue straight under the streetlights, heading towards a tall building with blue illuminated letters in the distance on your right. Approach a yellow-striped crosswalk on the path, marked by a blue circular sign and a red triangular sign. Cross the crosswalk and stop near the white car parked on the right side of the path. This is your destination.",
+    "Mission": "SocialACT_013",
+    "EndTime": 370.0,
+    "Stopped": 0
+}

@@ -1,0 +1,138 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Large data directories (download separately)
+data/
+models/
+
+# Docker build logs
+docker-build*.log
+
+# Model weights
+*.safetensors
+*.bin
+*.pth
+*.pt
+
+# Video files
+*.mp4
+*.avi
+*.mov
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary
+*.tmp
+*.bak
+
+SocialACT_*/             # SocialACT_001, 002... 모두 제외
+SocaiACT_Test/
+01_cube_and_panorama_images/
+
+# Large folders
+rosbag2_*/
+cam_*.bag/
+Ayun_data/
+Sample_data/
+FAST_LIO2/
+OmniNav/
+OmniNav_Slowfast/
+install/
+test_docker/
+
+# Large data/video folders
+results/
+Ayun_data/
+SocaiACT_Test/
+00_insta360_videos/
+easy10/
+Sample_data/
+OmniNav_Slowfast/
+OmniNav/
+FAST_LIO2/
+models/
+rosbag2_*/
+cam_*.bag/
+install/
+test_docker/
+
+# Large file types
+*.mp4
+*.avi
+*.mov
+*.bag
+*.safetensors
+*.bin
+*.pth
+*.pt
+*.npy
+*.pkl
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Large data directories (download separately)
+data/
+models/
+SocialACT/
+core
+SocialACT_revision/
+SocialACT_Test/
+# Docker build logs1
+docker-build*.log
+
+# Model weights
+*.safetensors
+*.bin
+*.pth
+*.pt
+
+# Video files
+*.mp4
+*.avi
+*.mov
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary
+*.tmp
+*.bak
+
+capture/
+gemini_driver/
+r2r analyze/
+*.zip
+*.stl
+*.STL
+*.so*
+*.o
+build/
+SocialACT_Low_Test_Ayun/
+SocialACT_easy10_2hz/
+*.jpg
+*.png
+*.jpeg

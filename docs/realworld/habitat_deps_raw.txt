@@ -1,0 +1,113 @@
+# Track A - A-1 Raw Dependency Scan
+timestamp=2026-02-24T00:50:13+09:00
+workspace=/home/aprl_msi/ayun/OmniNav_setup
+
+## Scope 1: infer_ovon_slowfast runtime path
+command: rg -n "sim\.|agent\.get_state\(|pathfinder\.|maps\.|GreedyGeodesicFollower|ShortestPath|geodesic_distance|get_sensor_observations|step_filter|set_state\(" infer_ovon_slowfast --glob "*.py"
+infer_ovon_slowfast/simulator.py:8:    sim_cfg = habitat_sim.SimulatorConfiguration()
+infer_ovon_slowfast/simulator.py:14:    agent_cfg = habitat_sim.agent.AgentConfiguration()
+infer_ovon_slowfast/simulator.py:15:    agent_cfg.action_space['turn_left'] = habitat_sim.agent.ActionSpec("turn_left", habitat_sim.agent.ActuationSpec(amount=agent_settings["turn_angle"]))
+infer_ovon_slowfast/simulator.py:16:    agent_cfg.action_space['turn_right'] = habitat_sim.agent.ActionSpec("turn_right", habitat_sim.agent.ActuationSpec(amount=agent_settings["turn_angle"]))
+infer_ovon_slowfast/simulator.py:17:    agent_cfg.action_space['move_forward'] = habitat_sim.agent.ActionSpec("move_forward", habitat_sim.agent.ActuationSpec(amount=agent_settings['step_size']))
+infer_ovon_slowfast/simulator.py:22:    rgb_sensor_spec = habitat_sim.CameraSensorSpec()
+infer_ovon_slowfast/simulator.py:24:    rgb_sensor_spec.sensor_type = habitat_sim.SensorType.COLOR
+infer_ovon_slowfast/simulator.py:29:    rgb_sensor_left_spec = habitat_sim.CameraSensorSpec()
+infer_ovon_slowfast/simulator.py:31:    rgb_sensor_left_spec.sensor_type = habitat_sim.SensorType.COLOR
+infer_ovon_slowfast/simulator.py:37:    rgb_sensor_right_spec = habitat_sim.CameraSensorSpec()
+infer_ovon_slowfast/simulator.py:39:    rgb_sensor_right_spec.sensor_type = habitat_sim.SensorType.COLOR
+infer_ovon_slowfast/simulator.py:46:    depth_sensor_spec = habitat_sim.CameraSensorSpec()
+infer_ovon_slowfast/simulator.py:48:    depth_sensor_spec.sensor_type = habitat_sim.SensorType.DEPTH
+infer_ovon_slowfast/simulator.py:59:    return habitat_sim.Configuration(sim_cfg, [agent_cfg])
+infer_ovon_slowfast/simulator.py:62:    nav_mesh_cfg = habitat_sim.NavMeshSettings()
+infer_ovon_slowfast/utils.py:24:            path = habitat_sim.ShortestPath()
+infer_ovon_slowfast/utils.py:28:                current_geo_dist = path.geodesic_distance
+infer_ovon_slowfast/utils.py:159:        sim = abstract_sim.simulator
+infer_ovon_slowfast/utils.py:160:        agent = abstract_sim.agent
+infer_ovon_slowfast/utils.py:161:        agent_state = habitat_sim.AgentState()
+infer_ovon_slowfast/utils.py:166:        agent.set_state(agent_state)
+infer_ovon_slowfast/utils.py:167:        path_finder = sim.pathfinder   
+infer_ovon_slowfast/run_nav_ovon_omni.py:96:        top_down_map = maps.get_topdown_map_from_sim(sim, map_resolution=map_resolution,  draw_border=False)
+infer_ovon_slowfast/run_nav_ovon_omni.py:107:        prev_agent_state = agent.get_state()
+infer_ovon_slowfast/run_nav_ovon_omni.py:125:                obervations = sim.step(action=action)
+infer_ovon_slowfast/run_nav_ovon_omni.py:129:                agent_state = agent.get_state()
+infer_ovon_slowfast/run_nav_ovon_omni.py:137:                rgb_image_data = sim.get_sensor_observations()['color_sensor'][:, :, :3]
+infer_ovon_slowfast/run_nav_ovon_omni.py:140:                agent_state = agent.get_state()
+infer_ovon_slowfast/run_nav_ovon_omni.py:145:            agent_state = agent.get_state()
+infer_ovon_slowfast/run_nav_ovon_omni.py:178:                    follower = habitat_sim.GreedyGeodesicFollower(path_finder, agent, forward_key="move_forward", left_key="turn_left", right_key="turn_right")
+infer_ovon_slowfast/run_nav_ovon_omni.py:217:                        obervations = sim.step(action=action)
+infer_ovon_slowfast/run_nav_ovon_omni.py:218:                        agent_state = agent.get_state()
+infer_ovon_slowfast/run_nav_ovon_omni.py:244:                while float(np.linalg.norm(np.array(agent.get_state().position) - np.array(target_position)))>0.1 and count < 200:
+infer_ovon_slowfast/run_nav_ovon_omni.py:268:                    agent_state = agent.get_state()
+infer_ovon_slowfast/run_nav_ovon_omni.py:295:                if not is_final_decision and float(np.linalg.norm(np.array(agent.get_state().position) - np.array(target_position)))<0.25:
+infer_ovon_slowfast/run_nav_ovon_omni.py:300:        agent_state = agent.get_state()
+infer_ovon_slowfast/run_nav_ovon_omni.py:307:        path = habitat_sim.MultiGoalShortestPath()
+infer_ovon_slowfast/run_nav_ovon_omni.py:312:            start_end_geo_distance = path.geodesic_distance
+infer_ovon_slowfast/run_nav_ovon_omni.py:318:        path = habitat_sim.MultiGoalShortestPath()
+infer_ovon_slowfast/run_nav_ovon_omni.py:322:            agent_end_geo_distance = path.geodesic_distance
+infer_ovon_slowfast/frontier_utils.py:17:    return int(meters/ maps.calculate_meters_per_pixel(map_resolution, sim=sim))
+infer_ovon_slowfast/frontier_utils.py:20:        a_x, a_y = maps.to_grid(
+infer_ovon_slowfast/frontier_utils.py:33:        realworld_x, realworld_y = maps.from_grid(
+infer_ovon_slowfast/frontier_utils.py:40:            return sim.pathfinder.snap_point(
+infer_ovon_slowfast/frontier_utils.py:44:            sim.pathfinder.snap_point([y, agent_position[1], x])
+infer_ovon_slowfast/sim_utils.py:9:    sim_cfg = habitat_sim.SimulatorConfiguration()
+infer_ovon_slowfast/sim_utils.py:11:    #sim_cfg.navmesh_settings = habitat_sim.nav.NavMeshSettings()
+infer_ovon_slowfast/sim_utils.py:16:    agent_cfg = habitat_sim.agent.AgentConfiguration()
+infer_ovon_slowfast/sim_utils.py:17:    agent_cfg.action_space['turn_left'] = habitat_sim.agent.ActionSpec("turn_left", habitat_sim.agent.ActuationSpec(amount=30.0))
+infer_ovon_slowfast/sim_utils.py:18:    agent_cfg.action_space['turn_right'] = habitat_sim.agent.ActionSpec("turn_right", habitat_sim.agent.ActuationSpec(amount=30.0))
+infer_ovon_slowfast/sim_utils.py:19:    agent_cfg.action_space['move_forward'] = habitat_sim.agent.ActionSpec("move_forward", habitat_sim.agent.ActuationSpec(amount=0.25))
+infer_ovon_slowfast/sim_utils.py:25:    rgb_sensor_spec = habitat_sim.CameraSensorSpec()
+infer_ovon_slowfast/sim_utils.py:27:    rgb_sensor_spec.sensor_type = habitat_sim.SensorType.COLOR
+infer_ovon_slowfast/sim_utils.py:33:    depth_sensor_spec = habitat_sim.CameraSensorSpec()
+infer_ovon_slowfast/sim_utils.py:35:    depth_sensor_spec.sensor_type = habitat_sim.SensorType.DEPTH
+infer_ovon_slowfast/sim_utils.py:42:    return habitat_sim.Configuration(sim_cfg, [agent_cfg])
+infer_ovon_slowfast/sim_utils.py:56:    sim.recompute_navmesh(sim.pathfinder, habitat_sim.NavMeshSettings())
+infer_ovon_slowfast/sim_utils.py:57:    agent = sim.initialize_agent(sim_settings["default_agent"])
+infer_ovon_slowfast/sim_utils.py:58:    agent_state = habitat_sim.AgentState()
+infer_ovon_slowfast/sim_utils.py:61:    agent.set_state(agent_state)
+infer_ovon_slowfast/qwen_utils.py:212:        agent_state = habitat_sim.AgentState()
+infer_ovon_slowfast/qwen_utils.py:223:            new_pos=np.array(sim.step_filter(agent.state.position,new_pos ))
+infer_ovon_slowfast/qwen_utils.py:225:            if sim.pathfinder.is_navigable(new_pos) and np.linalg.norm(new_pos-agent.state.position)>0.01:
+infer_ovon_slowfast/qwen_utils.py:231:        agent.set_state(agent_state)            
+infer_ovon_slowfast/qwen_utils.py:232:        return sim.get_sensor_observations(agent_ids=[0])[0],[transform_from_local_frame(np.insert(agent_state.position, 1, 0), ref_coord, ref_quat_dict)] ,rot
+infer_ovon_slowfast/qwen_utils.py:245:    obervations =  sim.get_sensor_observations(agent_ids=[0])[0]
+infer_ovon_slowfast/qwen_utils.py:320:    agent_pos = agent.get_state().position
+infer_ovon_slowfast/qwen_utils.py:321:    new_rot = agent.get_state().rotation 
+infer_ovon_slowfast/qwen_utils.py:323:    new_pos = np.array(sim.step_filter(agent_pos, pos))
+infer_ovon_slowfast/qwen_utils.py:326:    if np.any(np.isnan(new_pos)) or not sim.pathfinder.is_navigable(new_pos):
+infer_ovon_slowfast/qwen_utils.py:330:        new_pos = np.array(sim.pathfinder.snap_point(new_pos))
+infer_ovon_slowfast/qwen_utils.py:331:        if np.any(np.isnan(new_pos)) or not sim.pathfinder.is_navigable(new_pos):
+infer_ovon_slowfast/qwen_utils.py:337:    agent_state = habitat_sim.AgentState()
+infer_ovon_slowfast/qwen_utils.py:340:    agent.set_state(agent_state)
+infer_ovon_slowfast/qwen_utils.py:341:    # obs = sim.get_observations()
+infer_ovon_slowfast/qwen_utils.py:343:    return sim.get_sensor_observations(agent_ids=[0])[0],[transform_from_local_frame(np.insert(way_point_coord, 1, 0), ref_coord, ref_quat_dict) for  way_point_coord in wp_pred],rot
+infer_ovon_slowfast/qwen_utils.py:502:    scene_node = sim.get_agent(0).scene_node
+infer_ovon_slowfast/qwen_utils.py:505:        @ habitat_sim.geo.FRONT
+infer_ovon_slowfast/qwen_utils.py:507:    agent_state = agent.get_state()
+infer_ovon_slowfast/qwen_utils.py:508:    rotation = habitat_sim.utils.quat_from_angle_axis(
+infer_ovon_slowfast/qwen_utils.py:509:        theta, habitat_sim.geo.UP
+infer_ovon_slowfast/qwen_utils.py:511:    move_ax = habitat_sim.utils.quat_rotate_vector(rotation, forward_ax)
+infer_ovon_slowfast/path_utils.py:82:    shortest_path = habitat_sim.nav.ShortestPath()
+infer_ovon_slowfast/path_utils.py:85:    if not sim.pathfinder.find_path(shortest_path):
+infer_ovon_slowfast/path_utils.py:94:    cost = path.geodesic_distance
+
+## Scope 2: fast/control scripts touched by realworld demo
+command: rg -n "sim\.|habitat|maps\.|pathfinder\.|get_agent_state|get_observations|get_sensor_observations" infer_r2r_rxr/run_infer_online_panorama.py infer_r2r_rxr/agent/waypoint_agent.py infer_r2r_rxr/run_infer_iphone_panorama.py --glob "*.py"
+infer_r2r_rxr/agent/waypoint_agent.py:6:    from habitat import Env
+infer_r2r_rxr/agent/waypoint_agent.py:7:    from habitat.core.agent import Agent
+infer_r2r_rxr/agent/waypoint_agent.py:9:    from habitat.utils.visualizations import maps
+infer_r2r_rxr/agent/waypoint_agent.py:85:            obs['pose'] = {'position': env._sim.get_agent_state().position.tolist(),
+infer_r2r_rxr/agent/waypoint_agent.py:86:                           'rotation': [env._sim.get_agent_state().rotation.w,
+infer_r2r_rxr/agent/waypoint_agent.py:87:                                        env._sim.get_agent_state().rotation.x,
+infer_r2r_rxr/agent/waypoint_agent.py:88:                                        env._sim.get_agent_state().rotation.y,
+infer_r2r_rxr/agent/waypoint_agent.py:89:                                        env._sim.get_agent_state().rotation.z]}
+infer_r2r_rxr/agent/waypoint_agent.py:387:        else:  ## habitat仿真坐标系
+infer_r2r_rxr/agent/waypoint_agent.py:530:            # 맵 컬러 변환 (habitat 없이 직접 처리)
+
+## Scope 3: model path related lines (slow)
+command: rg -n "def add_arguments|model_path|--model-path" infer_ovon_slowfast/utils.py infer_ovon_slowfast/run_nav_ovon_omni.py OmniNav_Slowfast/README.md --glob "*.py"
+infer_ovon_slowfast/run_nav_ovon_omni.py:40:model_path=args.model_path
+infer_ovon_slowfast/run_nav_ovon_omni.py:46:# model_path='./data/ckpts/Qwen2.5-VL-3B_mh_data_more_image_5_3_3epoch_vit'
+infer_ovon_slowfast/run_nav_ovon_omni.py:52:        model_path, torch_dtype=torch.bfloat16, device_map="auto",attn_implementation="flash_attention_2"
+infer_ovon_slowfast/run_nav_ovon_omni.py:54:processor = AutoProcessor.from_pretrained(model_path, min_pixels=min_pixels, max_pixels=max_pixels)
+infer_ovon_slowfast/utils.py:206:def add_arguments():
+infer_ovon_slowfast/utils.py:209:    parser.add_argument('--model_path', type=int, default=' ')

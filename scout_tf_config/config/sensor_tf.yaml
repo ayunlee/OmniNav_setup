@@ -1,0 +1,70 @@
+# Phase 2 TF config for OmniNav real-world demo
+# NOTE:
+# - base_to_lidar.z uses base_link frame, not ground frame.
+# - Measured ground->lidar = 0.43 m, base_link->ground ~= 0.188 m (from Scout URDF wheel geometry),
+#   so base_link->lidar.z starts from ~0.242 m.
+
+frames:
+  map: map
+  cloud: camera_init
+  base_link: base_link
+  lidar: lidar_frame
+  cam_front: cam_front_color_optical_frame
+  cam_left: cam_left_color_optical_frame
+  cam_right: cam_right_color_optical_frame
+
+topics:
+  odometry: /Odometry
+  cam_front: /cam_front/color/image_raw
+  cam_left: /cam_left/color/image_raw
+  cam_right: /cam_right/color/image_raw
+
+base_to_lidar:
+  x: 0.09
+  y: 0.0
+  z: 0.242
+  roll: 0.0
+  pitch: 0.0
+  yaw: 0.0
+
+lidar_to_camera:
+  front:
+    x: -0.10
+    y: 0.0
+    z: 0.15
+    qx: -0.50733538
+    qy: 0.51153833
+    qz: -0.49071906
+    qw: 0.49003486
+  left:
+    x: -0.10
+    y: 0.045
+    z: 0.05
+    qx: -0.72419875
+    qy: 0.02107380
+    qz: 0.00707296
+    qw: 0.68923293
+  right:
+    x: -0.10
+    y: -0.045
+    z: 0.05
+    qx: -0.01739397
+    qy: -0.69960845
+    qz: 0.71430758
+    qw: -0.00318481
+
+bridge:
+  use_odom_tf_bridge: true
+  source_topic: /Odometry
+  parent_frame: map
+  child_frame: base_link
+
+map_to_cloud_static_tf:
+  enable: true
+  x: 0.0
+  y: 0.0
+  z: 0.0
+  qx: 0.0
+  qy: 0.0
+  qz: 0.0
+  qw: 1.0

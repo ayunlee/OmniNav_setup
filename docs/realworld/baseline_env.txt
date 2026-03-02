@@ -1,0 +1,74 @@
+capture_timestamp=2026-02-24T00:00:03+09:00
+
+[workspace]
+repo_path=/home/aprl_msi/ayun/OmniNav_setup
+git_branch=main
+git_commit_short=c1249246
+
+[system]
+os=Ubuntu 24.04.3 LTS (Noble Numbat)
+kernel=Linux edgexpert-4b8d 6.14.0-1015-nvidia aarch64
+python_executable=/usr/bin/python3
+python_version=3.12.3
+
+[python_packages_in_current_shell]
+torch=NOT_AVAILABLE
+transformers=NOT_AVAILABLE
+cuda_available=UNKNOWN
+cuda_version=UNKNOWN
+note=Current host shell does not have torch/transformers installed. Capture runtime container env separately if inference runs in Docker.
+
+[model_paths]
+detected_model_path=/home/aprl_msi/ayun/OmniNav_setup/models/chongchongjj/OmniNav
+run_infer_online_panorama_default=../OmniNav
+run_infer_iphone_panorama_example=../models/chongchongjj/OmniNav
+
+[fast_lio_repo]
+path=/home/aprl_msi/ayun/OmniNav_setup/FAST_LIO2/FAST_LIO_SLAM_ros2
+git_branch=Ericsii/FAST_LIO/ros2
+git_commit_short=705805d
+remote_origin=https://github.com/rohrschacht/FAST_LIO_SLAM_ros2.git
+
+[phase0_notes]
+1=This file is the rollback baseline anchor for Phase 0.
+2=If runtime uses Docker, record image tag and package versions inside the container before changing dependencies.
+
+[container_static_from_repository]
+dockerfile_path=/home/aprl_msi/ayun/OmniNav_setup/Dockerfile
+base_image=nvcr.io/nvidia/pytorch:25.09-py3
+ros_distro_in_dockerfile=jazzy
+python_version_expected_from_base=3.12.x (inferred from NGC PyTorch 25.09 image)
+torch_expected_from_base=2.9.0a0+50eac811a6.nv25.09 (from local compatibility script)
+transformers_source=editable install from /workspace/train_code/transformers-main
+ld_preload_workaround_required=yes
+ld_preload_libs=/opt/hpcx/ucx/lib/libucs.so.0:/opt/hpcx/ucx/lib/libucp.so.0:/opt/hpcx/ucx/lib/libucm.so.0
+
+[container_static_evidence]
+dockerfile_base_image_ref=Dockerfile:4
+dockerfile_python_packages_ref=Dockerfile:37-43
+dockerfile_transformers_editable_install_ref=Dockerfile:52-53
+dockerfile_ros_jazzy_ref=Dockerfile:58
+runtime_ld_preload_reexec_ref=infer_r2r_rxr/run_infer_online_panorama.py:11-17
+expected_torch_version_hint_ref=infer_r2r_rxr/check_downgrade_compatibility.py:76
+
+[runtime_dynamic_capture_status]
+docker_container_name_hint=omninav_container
+status=complete
+detail=Container runtime package versions were captured from omninav_container with LD_PRELOAD workaround.
+next_step=none
+
+[runtime_dynamic_capture]
+capture_timestamp=2026-02-24T00:10:30+09:00
+container_name=omninav_container
+container_image=omninav_control
+container_status=Up 11 days
+python=3.12.3
+python_executable=/usr/bin/python3
+torch=2.9.0a0+50eac811a6.nv25.09
+cuda_available=True
+cuda_version=13.0
+transformers=4.51.3
+transformers_file=/workspace/OmniNav/models/chongchongjj/OmniNav/train_code/transformers-main/src/transformers/__init__.py
+workspace_git_branch=main
+workspace_git_commit_short=c1249246
+note=Runtime import checks used LD_PRELOAD=/opt/hpcx/ucx/lib/libucs.so.0:/opt/hpcx/ucx/lib/libucp.so.0:/opt/hpcx/ucx/lib/libucm.so.0, matching inference script behavior.

@@ -1,0 +1,8 @@
+{
+    "Goal": "STARBUCKS",
+    "StartTime": 90.0,
+    "Instruction": "Cross the street using the zebra crossing. Once you reach the sidewalk on the other side, turn right. Walk straight along the paved sidewalk, keeping the street on your left and the buildings on your right. Pass a row of parked yellow electric scooters on your left. Continue straight ahead until you reach a store on your right with a green circular logo and the word STARBUCKS in illuminated white letters above its glass storefront. Stop in front of this store. This is your destination.",
+    "Mission": "SocialACT_070",
+    "EndTime": 219.0,
+    "Stopped": 1
+}

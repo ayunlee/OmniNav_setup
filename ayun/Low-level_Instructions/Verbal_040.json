@@ -1,0 +1,8 @@
+{
+    "Goal": "A sheltered bicycle parking area",
+    "StartTime": 0.0,
+    "Instruction": "Walk straight ahead along the paved sidewalk with the yellow tactile paving strip, keeping the building with the bright blue ground-floor facade on your left. Pass the glass transit shelter on your right. Continue straight as the path opens into a wider plaza area with red brick patterns. Keep the trees planted in stone borders on your left as you walk towards the tall building with the dark grey lower section. Stop when you reach the open-sided structure with a green roof attached to the base of the building, where several bicycles are parked. This sheltered area is your destination.",
+    "Mission": "SocialACT_050",
+    "EndTime": 50.0,
+    "Stopped": 0
+}
