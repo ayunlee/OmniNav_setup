@@ -25,18 +25,19 @@ from safetensors.torch import load_file
 
 from PIL import Image
 from copy import deepcopy
+from typing import Optional, Sequence
 
 from transformers import AutoProcessor, AutoTokenizer, AutoConfig, Qwen2VLForConditionalGeneration, \
     Qwen2_5_VLForConditionalGeneration, AutoModelForImageTextToText
 from qwen_vl_utils import process_vision_info
 
-SAVE_RANDER_IMG = True
+SAVE_RANDER_IMG = False
 PREDICT_SCALE = 0.3  # Original scale (model outputs normalized coords)
-MAX_HISTORY_FRAMES = 15  # Slightly less than paper (20) for 16GB VRAM
+MAX_HISTORY_FRAMES = 20
 magic_crop = False
 NUM_CURRENT_IMAGE = 3
 INPUT_IMG_SIZE = (480, 426)  # 논문 기준 해상도 (480x426)
-HISTORY_RESIZE_RATIO = 0.25  # History ~96x85
+HISTORY_IMG_SIZE = (120, 106)  # Paper-style history buffer size
 
 MODEL_TYPE = 'Waypoint'
 NUM_ACTION_TRUNK = 5
@@ -172,8 +173,18 @@ class QwenModel():
         # KV cache 초기화 (향후 구현용)
         self.past_key_values = None
         self.use_kv_cache = False  # forward()에서는 지원 안 함
+        # Runtime fallback diagnostics (coordinate-token path)
+        self.last_fallback_events = []
+        self.fallback_total_count = 0
+        self.fallback_reason_counts = {}
         # Note: from_pretrained already loads safetensors, don't override with load_state_dict
         # which can corrupt 8-bit quantized weights
+
+    def _record_fallback(self, reason: str, detail: str = "") -> None:
+        event = {"reason": str(reason), "detail": str(detail)}
+        self.last_fallback_events.append(event)
+        self.fallback_total_count += 1
+        self.fallback_reason_counts[reason] = self.fallback_reason_counts.get(reason, 0) + 1
 
     @staticmethod
     def qwen_data_pack(images, user_content):
@@ -190,8 +201,8 @@ class QwenModel():
                 cur_json = {
                     "type": "image",
                     "image": image,
-                    "resized_height": INPUT_IMG_SIZE[1] * HISTORY_RESIZE_RATIO,
-                    "resized_width": INPUT_IMG_SIZE[0] * HISTORY_RESIZE_RATIO,
+                    "resized_height": HISTORY_IMG_SIZE[1],
+                    "resized_width": HISTORY_IMG_SIZE[0],
                 }
             content.append(cur_json)
         content.append({
@@ -206,12 +217,13 @@ class QwenModel():
         ]
         return messages
 
-    def qwen_infer(self, messages, use_past_key_values=None):
+    def qwen_infer(self, messages, use_past_key_values=None, input_waypoints: Optional[np.ndarray] = None):
         """
         Args:
             messages: 입력 메시지
             use_past_key_values: KV cache 재사용 여부 (None이면 self.use_kv_cache 사용)
         """
+        self.last_fallback_events = []
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         text = text + "<|im_end|>"
         if self.nav_version == 'special_token':
@@ -230,48 +242,81 @@ class QwenModel():
         image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(text=text, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt")
         inputs = inputs.to("cuda")
+
+        # Coordinate-token path (same scale convention as original OVON fast code).
+        if input_waypoints is not None:
+            try:
+                input_waypoints = np.asarray(input_waypoints, dtype=np.float32)
+                if input_waypoints.ndim != 2 or input_waypoints.shape[1] != 2:
+                    raise ValueError(f"invalid input_waypoints shape: {input_waypoints.shape}")
+                input_positions = torch.tensor(input_waypoints, dtype=torch.float32, device=inputs.input_ids.device)
+                input_positions_scaled = (input_positions / PREDICT_SCALE)[None]
+                inputs["input_waypoints"] = input_positions_scaled
+                print(f"[DEBUG] coordinate tokens enabled: shape={tuple(input_positions_scaled.shape)}")
+            except Exception as exc:
+                self._record_fallback("coord_token_build_failed", repr(exc))
+                print(f"[WARN] coordinate-token build failed, fallback to text/image only: {exc}")
         
         # 참고: forward() 메서드는 KV cache를 직접 지원하지 않음
         # KV cache는 generate() 메서드나 decoder_only 모델에서만 완전히 지원됨
         # 현재 구조에서는 각 호출마다 전체 forward pass 수행
         
-        if flow_match == True:
-            norm = [{"min": [
-                         [-0.49142804741859436, -0.018926994875073433, -0.5000011853675626, 0.8660246981163404, 0.0],
-                         [-0.8506758809089646, -0.11684392392635345, -0.5176391471000088, -0.36602701582911296, 0.0],
-                         [-0.9391180276870728, -0.262770414352417, -0.5176390363234377, -0.5000015591363245, 0.0],
-                         [-0.9319084137678146, -0.5872985124588013, -0.5176390363234377, -0.5176391890893195, 0.0],
-                         [-0.9333658218383789, -0.8579317331314087, -0.5176390363233605, -0.5176391431200632, 0.0]],
-                     "max": [[0.8222980499267578, 1.1485368013381958, 0.5000012222510074, 1.0, 1.0],
-                             [0.8579317331314087, 1.0390557050704985, 0.5176391335634103, 0.13397477820902748, 1.0],
-                             [0.9584183096885622, 0.9541159868240356, 0.5176391335632885, 0.3660255949191993, 1.0],
-                             [0.9442337155342072, 0.9441415071487427, 0.5176391335631186, 0.5000004173778672, 1.0],
-                             [0.9610724449157715, 0.9491362571716309, 0.5176391335630393, 0.5176390878671062, 1.0]]}]
-            wp_pred, arrive_pred, sin_angle, cos_angle = self.model.forward(**inputs, norm=norm, action_former=True,
-                                                                            gt_waypoints=0, train=False,
-                                                                            train_branch=['continue'])
-        else:
-            # 메모리 효율성을 위해 torch.no_grad() 명시적 사용
+        def _forward_once():
+            if flow_match == True:
+                norm = [{"min": [
+                             [-0.49142804741859436, -0.018926994875073433, -0.5000011853675626, 0.8660246981163404, 0.0],
+                             [-0.8506758809089646, -0.11684392392635345, -0.5176391471000088, -0.36602701582911296, 0.0],
+                             [-0.9391180276870728, -0.262770414352417, -0.5176390363234377, -0.5000015591363245, 0.0],
+                             [-0.9319084137678146, -0.5872985124588013, -0.5176390363234377, -0.5176391890893195, 0.0],
+                             [-0.9333658218383789, -0.8579317331314087, -0.5176390363233605, -0.5176391431200632, 0.0]],
+                         "max": [[0.8222980499267578, 1.1485368013381958, 0.5000012222510074, 1.0, 1.0],
+                                 [0.8579317331314087, 1.0390557050704985, 0.5176391335634103, 0.13397477820902748, 1.0],
+                                 [0.9584183096885622, 0.9541159868240356, 0.5176391335632885, 0.3660255949191993, 1.0],
+                                 [0.9442337155342072, 0.9441415071487427, 0.5176391335631186, 0.5000004173778672, 1.0],
+                                 [0.9610724449157715, 0.9491362571716309, 0.5176391335630393, 0.5176390878671062, 1.0]]}]
+                return self.model.forward(**inputs, norm=norm, action_former=True,
+                                          gt_waypoints=0, train=False, train_branch=['continue'])
             with torch.no_grad():
-                wp_pred, arrive_pred, sin_angle, cos_angle = self.model.forward(**inputs, action_former=True,
-                                                                                gt_waypoints=0, train=False,
-                                                                                train_branch=['continue'])
+                return self.model.forward(**inputs, action_former=True,
+                                          gt_waypoints=0, train=False, train_branch=['continue'])
+
+        try:
+            wp_pred, arrive_pred, sin_angle, cos_angle = _forward_once()
+        except TypeError as exc:
+            if "input_waypoints" in inputs:
+                # Keep legacy compatibility when a checkpoint/forward path does not accept this key.
+                self._record_fallback("coord_token_forward_retry_without_tokens", repr(exc))
+                print(f"[WARN] coordinate-token forward failed, retry without input_waypoints: {exc}")
+                inputs.pop("input_waypoints", None)
+                wp_pred, arrive_pred, sin_angle, cos_angle = _forward_once()
+            else:
+                raise
         # DEBUG: Print raw model output
         print(f"[DEBUG] wp_pred raw: {wp_pred.cpu().float().detach().numpy()}")
         print(f"[DEBUG] wp_pred min/max: {wp_pred.min().item():.6f} / {wp_pred.max().item():.6f}")
         # Free memory after inference - 입력과 중간 텐서 정리
         del inputs
-        torch.cuda.empty_cache()
         return wp_pred * PREDICT_SCALE, arrive_pred, sin_angle, cos_angle
 
 
 class Waypoint_Agent():
-    def __init__(self, model_path, result_path, require_map=True):
+    def __init__(
+        self,
+        model_path,
+        result_path,
+        require_map=True,
+        use_coordinate_tokens: bool = False,
+        coord_token_history_len: int = 4,
+    ):
 
         print("Initialize Qwen")
 
         self.result_path = result_path
         self.require_map = require_map
+        self.use_coordinate_tokens = bool(use_coordinate_tokens)
+        self.coord_token_history_len = max(1, int(coord_token_history_len))
+        self.fallback_total_count = 0
+        self.fallback_reason_counts = {}
 
         if not self.result_path is None:
             os.makedirs(self.result_path, exist_ok=True)
@@ -404,6 +449,72 @@ Based on these information, you need to decide your next {num_action_trunck} act
         output_poses = [current_pose_inv @ self.pose_to_matrix(pose) for pose in input_poses]
         return output_poses
 
+    def _get_unique_frame_poses(self) -> Sequence[dict]:
+        if len(self.pose_list) == 0:
+            return []
+        if len(self.image_indices) != len(self.pose_list):
+            return list(self.pose_list)
+
+        # Keep one pose per frame id (left/right/front share same pose in one frame).
+        seen = set()
+        unique_rev = []
+        for idx in range(len(self.pose_list) - 1, -1, -1):
+            frame_id = self.image_indices[idx]
+            if frame_id in seen:
+                continue
+            seen.add(frame_id)
+            unique_rev.append(self.pose_list[idx])
+        unique_rev.reverse()
+        return unique_rev
+
+    def _sample_history_local_positions(self, local_positions: np.ndarray) -> np.ndarray:
+        # local_positions includes current at the last row; history excludes current.
+        history = local_positions[:-1]
+        need = self.coord_token_history_len
+        if history.shape[0] <= 0:
+            return np.zeros((need, 2), dtype=np.float32)
+        if history.shape[0] >= need:
+            idx = np.linspace(0, history.shape[0] - 1, need, dtype=int)
+            return history[idx].astype(np.float32)
+        out = np.repeat(history[:1], need, axis=0).astype(np.float32)
+        out[-history.shape[0]:] = history.astype(np.float32)
+        return out
+
+    def _build_coordinate_tokens(self, current_pose, subgoal: Optional[dict]) -> Optional[np.ndarray]:
+        # No subgoal -> no coordinate-token conditioning (explicit fallback policy).
+        if subgoal is None:
+            return None
+        if "x" not in subgoal or "y" not in subgoal:
+            return None
+
+        unique_poses = list(self._get_unique_frame_poses())
+        if len(unique_poses) == 0:
+            return None
+        current_pose_ref = unique_poses[-1]
+
+        local_poses = self.transform_poses_to_local(current_pose_ref, unique_poses)
+        local_positions = np.asarray([[p[0, 3], p[2, 3]] for p in local_poses], dtype=np.float32)
+        if local_positions.ndim != 2 or local_positions.shape[1] != 2:
+            return None
+
+        history_4 = self._sample_history_local_positions(local_positions)
+        current_local = local_positions[-1].astype(np.float32)
+
+        # Apply same ROS->Habitat mapping convention used in online runner: [x, 0, y].
+        subgoal_world_h = np.array(
+            [float(subgoal["x"]), 0.0, float(subgoal["y"]), 1.0],
+            dtype=np.float32,
+        )
+        current_T = self.pose_to_matrix(current_pose_ref)
+        subgoal_local_h = np.linalg.inv(current_T) @ subgoal_world_h
+        subgoal_local = np.array([subgoal_local_h[0], subgoal_local_h[2]], dtype=np.float32)
+
+        coord_tokens = np.vstack([history_4, current_local[None, :], subgoal_local[None, :]]).astype(np.float32)
+        # Contract: N=6 -> [hist4, current, target].
+        if coord_tokens.shape != (self.coord_token_history_len + 2, 2):
+            return None
+        return coord_tokens
+
     def generate_infer_prompt(self, instruction):
         cur_prompt = deepcopy(self.promt_template)
 
@@ -467,8 +578,7 @@ Based on these information, you need to decide your next {num_action_trunck} act
         self.image_indices.extend([self.total_frame_count] * len(rgbs_new))
         self.total_frame_count += 1
         if len(self.rgb_list) > NUM_CURRENT_IMAGE:
-            self.rgb_list[-1 - NUM_CURRENT_IMAGE] = self.rgb_list[-1 - NUM_CURRENT_IMAGE].resize(
-                (int(INPUT_IMG_SIZE[0] * HISTORY_RESIZE_RATIO), int(INPUT_IMG_SIZE[1] * HISTORY_RESIZE_RATIO)))
+            self.rgb_list[-1 - NUM_CURRENT_IMAGE] = self.rgb_list[-1 - NUM_CURRENT_IMAGE].resize(HISTORY_IMG_SIZE)
 
         # 如果超过最大历史帧数，需要重新采样
         if len(self.rgb_list) > MAX_HISTORY_FRAMES + NUM_CURRENT_IMAGE:
@@ -605,12 +715,37 @@ Based on these information, you need to decide your next {num_action_trunck} act
         end_time = time.time()
         print(f"generate_infer_prompt elapsed: {end_time - start_time:.4f}s")
 
+        frame_fallback_reasons = []
+        input_waypoints = None
+        if self.use_coordinate_tokens:
+            try:
+                input_waypoints = self._build_coordinate_tokens(pose, observations.get("subgoal"))
+                if input_waypoints is not None:
+                    print(
+                        "[DEBUG] input_waypoints(local) first/last="
+                        f"{input_waypoints[0].tolist()} / {input_waypoints[-1].tolist()}"
+                    )
+                else:
+                    frame_fallback_reasons.append("coord_tokens_unavailable")
+                    print("[DEBUG] input_waypoints disabled this frame (no valid subgoal/history)")
+            except Exception as exc:
+                input_waypoints = None
+                frame_fallback_reasons.append("coord_tokens_prepare_exception")
+                print(f"[WARN] failed to build input_waypoints, fallback: {exc}")
+
         start_time = time.time()
         # print("question")
         # print(navigation_qs)
-        wp_pred_, src_arrive_pred, sin_angle, cos_angle = self.model.qwen_infer(navigation_qs)
+        wp_pred_, src_arrive_pred, sin_angle, cos_angle = self.model.qwen_infer(
+            navigation_qs,
+            input_waypoints=input_waypoints,
+        )
         end_time = time.time()
         print(f"qwen_infer elapsed: {end_time - start_time:.4f}s")
+        if getattr(self.model, "last_fallback_events", None):
+            for evt in self.model.last_fallback_events:
+                reason = evt.get("reason", "unknown_model_fallback")
+                frame_fallback_reasons.append(str(reason))
         if flow_match:
             print(src_arrive_pred.squeeze())
             cnt = 0
@@ -651,6 +786,22 @@ Based on these information, you need to decide your next {num_action_trunck} act
             cv2.imwrite(os.path.join(cur_episode_vis_folder, "{}.png".format(current_frame_index)),
                         cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
 
-        return {"action": wp_pred_, "arrive_pred": arrive_pred, "recover_angle": recover_angle, 
-                "sin_angle": sin_angle_np, "cos_angle": cos_angle_np}
+        # Real-time fallback diagnostics for paper-reproduction validation.
+        if len(frame_fallback_reasons) > 0:
+            # de-duplicate while preserving order
+            dedup = list(dict.fromkeys(frame_fallback_reasons))
+            for reason in dedup:
+                self.fallback_total_count += 1
+                self.fallback_reason_counts[reason] = self.fallback_reason_counts.get(reason, 0) + 1
+            print(
+                f"[FALLBACK][frame {current_frame_index:04d}] "
+                f"reasons={dedup} total={self.fallback_total_count} "
+                f"counts={self.fallback_reason_counts}"
+            )
+            frame_fallback_reasons = dedup
 
+        return {"action": wp_pred_, "arrive_pred": arrive_pred, "recover_angle": recover_angle,
+                "sin_angle": sin_angle_np, "cos_angle": cos_angle_np,
+                "coord_token_fallback": len(frame_fallback_reasons) > 0,
+                "fallback_reasons": frame_fallback_reasons,
+                "fallback_total_count": self.fallback_total_count}

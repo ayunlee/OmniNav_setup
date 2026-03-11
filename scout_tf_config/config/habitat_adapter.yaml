@@ -1,0 +1,40 @@
+topics:
+  occupancy: /omni/occupancy
+  pose2d: /omni/pose2d
+  cam_front: /cam_front/color/image_raw
+  cam_left: /cam_left/color/image_raw
+  cam_right: /cam_right/color/image_raw
+  frontiers: /omni/frontiers
+  subgoal: /omni/subgoal
+  instruction: /omni/instruction
+
+params:
+  decision_mode: model   # rule | model
+  decision_hz: 1.0
+  object_category: silver trash can
+  instruction_text: "Find the silver trash can. Stop in front of the silver trash can."   # optional fixed instruction from slow; if empty, template(object_category) is used
+
+  # Model backend (OmniNav slow)
+  model_path: /workspace/OmniNav/OmniNav_Slowfast
+  model_dtype: bfloat16
+  model_device_map: auto
+  model_attn_implementation: flash_attention_2
+  model_min_pixels: 3136
+  model_max_pixels: 20070400
+  model_max_new_tokens: 512
+  model_min_memory_images: 5
+
+  occupied_threshold: 65
+  min_frontier_cells: 8
+  max_frontiers: 20
+
+  subgoal_min_dist_m: 0.6
+  goal_reach_radius_m: 0.4
+  visited_quantization_m: 0.2
+  subgoal_stale_sec: 2.0
+
+  memory_maxlen: 200
+  memory_image_width: 480
+  memory_image_height: 426
+  sync_queue_size: 30
+  sync_slop_sec: 0.20

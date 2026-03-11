@@ -7,7 +7,6 @@ __pycache__/
 # Large data directories (download separately)
 data/
 models/
-
 # Docker build logs
 docker-build*.log
 
@@ -131,8 +130,12 @@ r2r analyze/
 *.so*
 *.o
 build/
+
+# ------------------------------------------------------------------
+# Local large datasets / generated artifacts (real-world runs)
+# ------------------------------------------------------------------
 SocialACT_Low_Test_Ayun/
 SocialACT_easy10_2hz/
-*.jpg
-*.png
-*.jpeg
+infer_r2r_rxr/Test18/
+infer_r2r_rxr/waypoint_data_online_*.png
+infer_r2r_rxr/waypoint_data_online_*.csv

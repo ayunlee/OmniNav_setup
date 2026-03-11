@@ -27,7 +27,7 @@ class OmniNavController(Node):
     """
     
     # Robot parameters (Scout Mini)
-    MAX_LINEAR_VEL = 0.6      # m/s (약간 상향 조정 가능, 안전을 위해 0.8 설정)
+    MAX_LINEAR_VEL = 0.8      # m/s (약간 상향 조정 가능, 안전을 위해 0.8 설정)
     MAX_ANGULAR_VEL = 0.6   # rad/s (로봇 최대 각속도, ~30 deg/s)
     WAYPOINT_DURATION = 0.15    # seconds per waypoint (5 waypoints = 1.0s total)
     CONTROL_RATE = 10          # Hz (제어 주기, 10Hz로 높여 더 부드럽게 반응)

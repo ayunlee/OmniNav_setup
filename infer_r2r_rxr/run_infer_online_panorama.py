@@ -26,17 +26,47 @@ import threading
 import cv2
 from datetime import datetime
 import math
+from collections import deque
 
 import matplotlib.cm as mpl_cm
 
 # ROS2 imports
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
 from std_msgs.msg import String
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 
 from agent.waypoint_agent import Waypoint_Agent
+
+
+class _TeeTextIO:
+    """Write text to multiple streams (used to mirror stdout/stderr into a log file)."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        # Keep terminal behavior where possible.
+        return any(getattr(s, "isatty", lambda: False)() for s in self.streams)
 
 
 def load_rgb_image_from_array(img_bgr: np.ndarray) -> np.ndarray:
@@ -59,7 +89,7 @@ def draw_waypoint_arrows_fpv(
     waypoints: list,
     arrow_thickness: int = 2,
     tipLength: float = 0.45,
-    stop_color: tuple = (0, 0, 255),   # BGR red for STOP
+    stop_color: tuple = (0, 0, 255),   # BGR red for STOP/OK marker
     stop_radius: int = 8,
     arrow_scale: float = 0.15,   # arrow length in body-frame meters
     vis_scale: float = 120.0,    # meters -> pixel
@@ -98,7 +128,7 @@ def draw_waypoint_arrows_fpv(
 
         if arrive > 0:
             cv2.circle(out, start_pixel, stop_radius, stop_color, -1)
-            cv2.putText(out, "STOP", (start_pixel[0] - 20, start_pixel[1] - 10),
+            cv2.putText(out, "OK", (start_pixel[0] - 12, start_pixel[1] - 10),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             break
 
@@ -170,28 +200,64 @@ def add_instruction_bar(img_rgb: np.ndarray, instruction: str, bar_height: int =
 class OmniNavOnlineInference:
     """Real-time OmniNav inference with Front/Left/Right cameras (ROS topics)."""
 
-    def __init__(self, model_path: str, instruction: str, result_path: str = "./data/result_online"):
+    def __init__(
+        self,
+        model_path: str,
+        instruction: str = "",
+        result_path: str = "./data/result_online",
+        pose_topic: str = "/omni/pose2d",
+        subgoal_topic: str = "/omni/subgoal",
+        instruction_topic: str = "/omni/instruction",
+        use_subgoal_hint: bool = True,
+        use_coordinate_tokens: bool = False,
+        max_vis_frames: int = 100,
+        max_camera_skew_ms: float = 200.0,
+        max_pose_dt_ms: float = 150.0,
+        max_subgoal_age_ms: float = 5000.0,
+    ):
         """
         Args:
             model_path: Path to OmniNav model
-            instruction: Navigation instruction text
+            instruction: Optional CLI instruction text (if empty, read from instruction_topic)
             result_path: Path to save results
         """
         self.result_path = result_path
-        self.instruction = instruction
+        self.instruction = (instruction or "").strip()
+        self.pose_topic = pose_topic
+        self.subgoal_topic = subgoal_topic
+        self.instruction_topic = instruction_topic
+        self.use_subgoal_hint = use_subgoal_hint
+        self.use_coordinate_tokens = use_coordinate_tokens
+        self.max_camera_skew_s = max(0.0, float(max_camera_skew_ms) / 1000.0)
+        self.max_pose_dt_s = max(0.0, float(max_pose_dt_ms) / 1000.0)
+        self.max_subgoal_age_s = max(0.0, float(max_subgoal_age_ms) / 1000.0)
 
         # Image buffers for front/left/right from ROS
         self.latest_front = None
         self.latest_left = None
         self.latest_right = None
+        self.latest_front_stamp = None
+        self.latest_left_stamp = None
+        self.latest_right_stamp = None
+        self.latest_frame_stamp = None
+        self.latest_cam_skew = None
         self.image_lock = threading.Lock()
         self.image_timestamp = None
+
+        # Navigation state buffers from ROS
+        self.latest_pose2d = None
+        self.pose_buffer = deque(maxlen=512)
+        self.latest_subgoal = None
+        self.latest_instruction = None
+        self.state_lock = threading.Lock()
+        self.last_runtime_instruction = self.instruction
+        self._last_sync_warn_ts = 0.0
         
         # Frame counter
         self.frame_count = 0
         
         # Visualization storage
-        self.vis_frame_list = []
+        self.vis_frame_list = deque(maxlen=max(10, int(max_vis_frames)))
         self.save_video = True
         
         # CSV records for waypoint data
@@ -202,10 +268,10 @@ class OmniNavOnlineInference:
         rclpy.init()
         self.ros_node = rclpy.create_node('omninav_inference')
         
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+        qos_reliable = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=10
         )
         # /action: must match omninav_control subscriber exactly (all policies)
         qos_action = QoSProfile(
@@ -215,24 +281,40 @@ class OmniNavOnlineInference:
             durability=DurabilityPolicy.VOLATILE
         )
         
-        # Image subscribers (front, left, right)
+        # Image subscribers (front, left, right) with timestamp synchronization.
+        # Using message_filters avoids mixing stale "latest" frames from different cameras.
+        self.front_sub = Subscriber(self.ros_node, Image, '/cam_front/color/image_raw', qos_profile=qos_profile_sensor_data)
+        self.left_sub = Subscriber(self.ros_node, Image, '/cam_left/color/image_raw', qos_profile=qos_profile_sensor_data)
+        self.right_sub = Subscriber(self.ros_node, Image, '/cam_right/color/image_raw', qos_profile=qos_profile_sensor_data)
+        self.image_sync = ApproximateTimeSynchronizer(
+            [self.front_sub, self.left_sub, self.right_sub],
+            queue_size=100,
+            slop=float(max(0.02, self.max_camera_skew_s)),
+        )
+        self.image_sync.registerCallback(self._image_synced_callback)
         self.ros_node.create_subscription(
-            Image,
-            '/cam_front/color/image_raw',
-            self._image_front_callback,
-            qos_profile
+            PoseStamped,
+            self.pose_topic,
+            self._pose2d_callback,
+            qos_reliable
         )
         self.ros_node.create_subscription(
-            Image,
-            '/cam_left/color/image_raw',
-            self._image_left_callback,
-            qos_profile
+            Odometry,
+            '/Odometry',
+            self._odometry_fallback_callback,
+            qos_reliable
         )
         self.ros_node.create_subscription(
-            Image,
-            '/cam_right/color/image_raw',
-            self._image_right_callback,
-            qos_profile
+            PoseStamped,
+            self.subgoal_topic,
+            self._subgoal_callback,
+            qos_reliable
+        )
+        self.ros_node.create_subscription(
+            String,
+            self.instruction_topic,
+            self._instruction_callback,
+            qos_reliable
         )
 
         # Action publisher (waypoints as JSON string)
@@ -240,9 +322,20 @@ class OmniNavOnlineInference:
         
         print("=" * 60)
         print("[OmniNav Online] ROS2 Node Ready")
-        print("[OmniNav Online] Subscribing to: /cam_front/color/image_raw, /cam_left/color/image_raw, /cam_right/color/image_raw")
+        print(
+            "[OmniNav Online] Subscribing to: "
+            "/cam_front/color/image_raw, /cam_left/color/image_raw, /cam_right/color/image_raw, "
+            f"{self.pose_topic}, {self.subgoal_topic}, {self.instruction_topic}"
+        )
         print("[OmniNav Online] Publishing to: /action")
-        print(f"[OmniNav Online] Instruction: {self.instruction[:80]}...")
+        print(
+            f"[OmniNav Online] Sync gates: camera_skew<={self.max_camera_skew_s*1000:.0f}ms, "
+            f"pose_dt<={self.max_pose_dt_s*1000:.0f}ms, subgoal_age<={self.max_subgoal_age_s*1000:.0f}ms"
+        )
+        if self.instruction:
+            print(f"[OmniNav Online] Instruction source: CLI ({self.instruction[:80]}...)")
+        else:
+            print("[OmniNav Online] Instruction source: /omni/instruction topic (waiting first message)")
         print("=" * 60)
         
         # Initialize OmniNav agent
@@ -252,10 +345,16 @@ class OmniNavOnlineInference:
         temp_agent_path = tempfile.mkdtemp(prefix="omninav_agent_")
         
         print("[OmniNav Online] Loading model...")
-        self.agent = Waypoint_Agent(model_path, temp_agent_path, require_map=False)
+        self.agent = Waypoint_Agent(
+            model_path,
+            temp_agent_path,
+            require_map=False,
+            use_coordinate_tokens=self.use_coordinate_tokens,
+        )
         self.agent.reset()
         self.agent.episode_id = "online_session"
         print("[OmniNav Online] Model loaded successfully")
+        print(f"[OmniNav Online] Coordinate tokens: {self.use_coordinate_tokens}")
         
         # Start ROS2 spin thread
         self.spin_thread = threading.Thread(target=self._spin_ros, daemon=True)
@@ -290,29 +389,88 @@ class OmniNavOnlineInference:
             print(f"[OmniNav Online] _image_msg_to_rgb error (encoding={getattr(msg, 'encoding', '?')}): {e}")
             return None
 
-    def _image_front_callback(self, msg: Image):
-        """Store latest front camera image."""
-        img_rgb = self._image_msg_to_rgb(msg)
-        if img_rgb is not None:
-            with self.image_lock:
-                self.latest_front = img_rgb
-                self.image_timestamp = time.time()
+    def _image_synced_callback(self, front_msg: Image, left_msg: Image, right_msg: Image):
+        """Store synchronized front/left/right image triplet."""
+        front_rgb = self._image_msg_to_rgb(front_msg)
+        left_rgb = self._image_msg_to_rgb(left_msg)
+        right_rgb = self._image_msg_to_rgb(right_msg)
+        if front_rgb is None or left_rgb is None or right_rgb is None:
+            return
 
-    def _image_left_callback(self, msg: Image):
-        """Store latest left camera image."""
-        img_rgb = self._image_msg_to_rgb(msg)
-        if img_rgb is not None:
-            with self.image_lock:
-                self.latest_left = img_rgb
-                self.image_timestamp = time.time()
+        front_stamp = self._stamp_to_sec(front_msg.header.stamp)
+        left_stamp = self._stamp_to_sec(left_msg.header.stamp)
+        right_stamp = self._stamp_to_sec(right_msg.header.stamp)
+        stamps = [front_stamp, left_stamp, right_stamp]
+        frame_stamp = float(sum(stamps) / 3.0)
+        cam_skew = float(max(stamps) - min(stamps))
 
-    def _image_right_callback(self, msg: Image):
-        """Store latest right camera image."""
-        img_rgb = self._image_msg_to_rgb(msg)
-        if img_rgb is not None:
-            with self.image_lock:
-                self.latest_right = img_rgb
-                self.image_timestamp = time.time()
+        with self.image_lock:
+            self.latest_front = front_rgb
+            self.latest_left = left_rgb
+            self.latest_right = right_rgb
+            self.latest_front_stamp = front_stamp
+            self.latest_left_stamp = left_stamp
+            self.latest_right_stamp = right_stamp
+            self.latest_frame_stamp = frame_stamp
+            self.latest_cam_skew = cam_skew
+            self.image_timestamp = time.time()
+
+    @staticmethod
+    def _yaw_from_quat_xyzw(x: float, y: float, z: float, w: float) -> float:
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    @staticmethod
+    def _stamp_to_sec(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+    def _pose2d_callback(self, msg: PoseStamped):
+        q = msg.pose.orientation
+        yaw = self._yaw_from_quat_xyzw(q.x, q.y, q.z, q.w)
+        pose_msg = {
+            'x': float(msg.pose.position.x),
+            'y': float(msg.pose.position.y),
+            'yaw': float(yaw),
+            'stamp': self._stamp_to_sec(msg.header.stamp),
+            'source': 'pose2d',
+        }
+        with self.state_lock:
+            self.latest_pose2d = pose_msg
+            self.pose_buffer.append(pose_msg)
+
+    def _odometry_fallback_callback(self, msg: Odometry):
+        # Fallback only: /omni/pose2d has priority when available.
+        with self.state_lock:
+            if self.latest_pose2d is not None and self.latest_pose2d.get('source') == 'pose2d':
+                return
+        q = msg.pose.pose.orientation
+        yaw = self._yaw_from_quat_xyzw(q.x, q.y, q.z, q.w)
+        pose_msg = {
+            'x': float(msg.pose.pose.position.x),
+            'y': float(msg.pose.pose.position.y),
+            'yaw': float(yaw),
+            'stamp': self._stamp_to_sec(msg.header.stamp),
+            'source': 'odometry',
+        }
+        with self.state_lock:
+            self.latest_pose2d = pose_msg
+            self.pose_buffer.append(pose_msg)
+
+    def _subgoal_callback(self, msg: PoseStamped):
+        with self.state_lock:
+            self.latest_subgoal = {
+                'x': float(msg.pose.position.x),
+                'y': float(msg.pose.position.y),
+                'stamp': self._stamp_to_sec(msg.header.stamp),
+            }
+
+    def _instruction_callback(self, msg: String):
+        text = (msg.data or "").strip()
+        if not text:
+            return
+        with self.state_lock:
+            self.latest_instruction = text
     
     def _spin_ros(self):
         """ROS2 spin in background thread"""
@@ -322,17 +480,131 @@ class OmniNavOnlineInference:
         """Get the latest front, left, right images (thread-safe).
         
         Returns:
-            (front_rgb, left_rgb, right_rgb, timestamp) or (None, None, None, None) if any is missing
+            (front_rgb, left_rgb, right_rgb, frame_stamp, cam_skew)
+            or (None, None, None, None, None) if any is missing
         """
         with self.image_lock:
-            if self.latest_front is not None and self.latest_left is not None and self.latest_right is not None:
+            if (
+                self.latest_front is not None and self.latest_left is not None and self.latest_right is not None
+                and self.latest_front_stamp is not None
+                and self.latest_left_stamp is not None
+                and self.latest_right_stamp is not None
+                and self.latest_frame_stamp is not None
+                and self.latest_cam_skew is not None
+            ):
                 return (
                     self.latest_front.copy(),
                     self.latest_left.copy(),
                     self.latest_right.copy(),
-                    self.image_timestamp,
+                    float(self.latest_frame_stamp),
+                    float(self.latest_cam_skew),
                 )
-            return None, None, None, None
+            return None, None, None, None, None
+
+    def get_latest_nav_state(self):
+        with self.state_lock:
+            pose = dict(self.latest_pose2d) if self.latest_pose2d is not None else None
+            subgoal = dict(self.latest_subgoal) if self.latest_subgoal is not None else None
+            instr = self.latest_instruction
+        return pose, subgoal, instr
+
+    def _get_pose_near_stamp(self, target_stamp: float):
+        with self.state_lock:
+            if len(self.pose_buffer) == 0:
+                return None, None
+            pose = min(self.pose_buffer, key=lambda p: abs(float(p['stamp']) - target_stamp))
+        dt = abs(float(pose['stamp']) - target_stamp)
+        if dt > self.max_pose_dt_s:
+            return None, dt
+        return dict(pose), dt
+
+    def _get_fresh_subgoal(self, target_stamp: float):
+        with self.state_lock:
+            subgoal = dict(self.latest_subgoal) if self.latest_subgoal is not None else None
+        if subgoal is None:
+            return None, None
+        age = abs(float(subgoal['stamp']) - target_stamp)
+        if age > self.max_subgoal_age_s:
+            return None, age
+        return subgoal, age
+
+    def _sync_warn(self, message: str):
+        now = time.time()
+        if now - self._last_sync_warn_ts >= 1.0:
+            print(f"[OmniNav Online][SYNC] {message}")
+            self._last_sync_warn_ts = now
+
+    def _get_active_instruction(self) -> str:
+        if self.instruction:
+            return self.instruction
+        with self.state_lock:
+            if self.latest_instruction:
+                return self.latest_instruction
+        return ""
+
+    def _pose2d_to_model_pose(self, pose2d: dict) -> dict:
+        # Convert ROS planar map pose to Habitat-like format expected by Waypoint_Agent.
+        # Position uses [x, y_up, z] => [map_x, 0, map_y]
+        # Rotation uses quaternion order [w, x, y, z].
+        yaw = float(pose2d['yaw'])
+        half = 0.5 * yaw
+        return {
+            'position': [float(pose2d['x']), 0.0, float(pose2d['y'])],
+            'rotation': [float(math.cos(half)), 0.0, float(math.sin(half)), 0.0],
+        }
+
+    @staticmethod
+    def _wrap_pi(angle_rad: float) -> float:
+        return (angle_rad + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _subgoal_to_target_waypoint(self, model_pose: dict, subgoal: dict):
+        """
+        Convert subgoal map/world coordinate to expected network waypoint frame.
+        Returns:
+            (dx_target, dy_target, local_xz)
+            - local_xz follows coordinate-token convention: [x_local, z_local]
+            - network waypoint convention: dx=right(+), dy=forward(+)
+        """
+        subgoal_world_h = np.array(
+            [float(subgoal["x"]), 0.0, float(subgoal["y"]), 1.0],
+            dtype=np.float32,
+        )
+        current_T = self.agent.pose_to_matrix(model_pose)
+        subgoal_local_h = np.linalg.inv(current_T) @ subgoal_world_h
+        local_x = float(subgoal_local_h[0])
+        local_z = float(subgoal_local_h[2])
+        # local [x, z] -> waypoint [dx(right), dy(forward)]
+        dx_target = local_z
+        dy_target = local_x
+        return dx_target, dy_target, (local_x, local_z)
+
+    @staticmethod
+    def _angle_error_deg(dx_target: float, dy_target: float, dx_wp: float, dy_wp: float):
+        nt = math.hypot(dx_target, dy_target)
+        nw = math.hypot(dx_wp, dy_wp)
+        if nt < 1e-6 or nw < 1e-6:
+            return None
+        dot = dx_target * dx_wp + dy_target * dy_wp
+        cosv = dot / (nt * nw)
+        cosv = max(-1.0, min(1.0, cosv))
+        return math.degrees(math.acos(cosv))
+
+    def _build_runtime_instruction(self, pose2d: dict, subgoal: dict) -> str:
+        base_instruction = self._get_active_instruction()
+        if not base_instruction:
+            base_instruction = "Find the target object."
+        if not self.use_subgoal_hint or pose2d is None or subgoal is None:
+            return base_instruction
+        dx = float(subgoal['x']) - float(pose2d['x'])
+        dy = float(subgoal['y']) - float(pose2d['y'])
+        dist = math.hypot(dx, dy)
+        goal_heading = math.atan2(dy, dx)
+        rel_heading = self._wrap_pi(goal_heading - float(pose2d['yaw']))
+        hint = (
+            f" Intermediate subgoal map=({subgoal['x']:.2f}, {subgoal['y']:.2f}), "
+            f"distance={dist:.2f}m, relative_heading={math.degrees(rel_heading):.1f}deg."
+        )
+        return base_instruction + hint
     
     def publish_action(self, action: dict):
         """Publish all 5 waypoints to /action topic (for sequential execution), return full waypoint list for visualization"""
@@ -413,30 +685,99 @@ class OmniNavOnlineInference:
     def _run_loop_ros(self, move_duration, PREDICT_SCALE, info):
         """Use subscribed front/left/right images from /cam_front/color/image_raw, /cam_left/color/image_raw, /cam_right/color/image_raw."""
         print(f"\n[OmniNav Online] Starting Step-by-Step Loop (Move Duration: {move_duration}s)")
-        print("[OmniNav Online] Waiting for first images (front, left, right)...")
+        print("[OmniNav Online] Waiting for first images (front, left, right), pose, and instruction...")
         while True:
-            front, left, right, _ = self.get_latest_images()
-            if front is not None and left is not None and right is not None:
-                print(f"[OmniNav Online] First images received! front={front.shape}, left={left.shape}, right={right.shape}")
+            front, left, right, frame_stamp, cam_skew = self.get_latest_images()
+            pose2d, pose_dt = (None, None)
+            if frame_stamp is not None and cam_skew is not None and cam_skew <= self.max_camera_skew_s:
+                pose2d, pose_dt = self._get_pose_near_stamp(frame_stamp)
+            _, _, instruction_from_topic = self.get_latest_nav_state()
+            active_instruction = self.instruction if self.instruction else (instruction_from_topic or "")
+            if (
+                front is not None
+                and left is not None
+                and right is not None
+                and pose2d is not None
+                and bool(active_instruction.strip())
+            ):
+                print(
+                    "[OmniNav Online] First data received! "
+                    f"front={front.shape}, left={left.shape}, right={right.shape}, "
+                    f"cam_skew_ms={cam_skew*1000.0:.1f}, pose_dt_ms={pose_dt*1000.0:.1f}, "
+                    f"pose_source={pose2d.get('source', 'unknown')}, "
+                    f"instruction_source={'cli' if self.instruction else 'topic'}"
+                )
                 break
+            if not active_instruction.strip():
+                print(f"[OmniNav Online] Waiting for instruction topic: {self.instruction_topic}")
+            elif cam_skew is not None and cam_skew > self.max_camera_skew_s:
+                self._sync_warn(
+                    f"waiting synced tri-view: cam_skew={cam_skew*1000.0:.1f}ms > {self.max_camera_skew_s*1000.0:.1f}ms"
+                )
+            elif frame_stamp is not None and pose2d is None and pose_dt is not None:
+                self._sync_warn(
+                    f"waiting synced pose: nearest_dt={pose_dt*1000.0:.1f}ms > {self.max_pose_dt_s*1000.0:.1f}ms"
+                )
             time.sleep(0.1)
         print("[OmniNav Online] Running inference loop. Press Ctrl+C to stop.")
         print("=" * 60)
         try:
             while True:
-                front, left, right, _ = self.get_latest_images()
+                front, left, right, frame_stamp, cam_skew = self.get_latest_images()
                 if front is None or left is None or right is None:
                     print("[OmniNav Online] Waiting for front/left/right images...")
                     time.sleep(0.1)
                     continue
-                default_pose = {'position': [0.0, 0.0, 0.0], 'rotation': [1.0, 0.0, 0.0, 0.0]}
+                if cam_skew is None or cam_skew > self.max_camera_skew_s:
+                    if cam_skew is not None:
+                        self._sync_warn(
+                            f"drop frame: cam_skew={cam_skew*1000.0:.1f}ms > {self.max_camera_skew_s*1000.0:.1f}ms"
+                        )
+                    time.sleep(0.02)
+                    continue
+                pose2d, pose_dt = self._get_pose_near_stamp(frame_stamp)
+                if pose2d is None:
+                    if pose_dt is None:
+                        self._sync_warn("waiting pose topic...")
+                    else:
+                        self._sync_warn(
+                            f"drop frame: nearest pose dt={pose_dt*1000.0:.1f}ms > {self.max_pose_dt_s*1000.0:.1f}ms"
+                        )
+                    time.sleep(0.02)
+                    continue
+                subgoal, subgoal_age = self._get_fresh_subgoal(frame_stamp)
+                if self.use_coordinate_tokens and subgoal is None:
+                    if subgoal_age is None:
+                        self._sync_warn("waiting subgoal topic for coordinate tokens...")
+                    else:
+                        self._sync_warn(
+                            f"stale subgoal: age={subgoal_age*1000.0:.1f}ms > {self.max_subgoal_age_s*1000.0:.1f}ms"
+                        )
+                    time.sleep(0.02)
+                    continue
+                runtime_instruction = self._build_runtime_instruction(pose2d, subgoal)
+                self.last_runtime_instruction = runtime_instruction
+                model_pose = self._pose2d_to_model_pose(pose2d)
+                align_dx_target = None
+                align_dy_target = None
+                align_err_deg = None
+                align_local_x = None
+                align_local_z = None
+                if subgoal is not None:
+                    try:
+                        align_dx_target, align_dy_target, local_xz = self._subgoal_to_target_waypoint(model_pose, subgoal)
+                        align_local_x, align_local_z = local_xz
+                    except Exception as exc:
+                        self._sync_warn(f"failed target projection: {exc}")
                 obs = {
                     'front': front,
                     'left': left,
                     'right': right,
                     'rgb': front,
-                    'instruction': {'text': self.instruction},
-                    'pose': default_pose
+                    'instruction': {'text': runtime_instruction},
+                    'pose': model_pose,
+                    # Optional conditioning path for coordinate-token fusion in Waypoint_Agent.
+                    'subgoal': subgoal,
                 }
                 start_time = time.time()
                 with torch.no_grad():
@@ -444,7 +785,17 @@ class OmniNavOnlineInference:
                 infer_time = time.time() - start_time
                 self.total_infer_time += infer_time
                 self.frame_count += 1
-                print(f"[Frame {self.frame_count:04d}] Inference time: {infer_time:.3f}s")
+                print(
+                    f"[Frame {self.frame_count:04d}] Inference time: {infer_time:.3f}s "
+                    f"(cam_skew={cam_skew*1000.0:.1f}ms, pose_dt={pose_dt*1000.0:.1f}ms, "
+                    f"subgoal_age_ms={'none' if subgoal_age is None else f'{subgoal_age*1000.0:.1f}'})"
+                )
+                if action.get("coord_token_fallback", False):
+                    print(
+                        f"[FALLBACK][Frame {self.frame_count:04d}] "
+                        f"reasons={action.get('fallback_reasons', [])} "
+                        f"total={action.get('fallback_total_count', -1)}"
+                    )
                 
                 if 'arrive_pred' in action and 'action' in action and 'recover_angle' in action:
                     arrive = int(action['arrive_pred'])
@@ -454,6 +805,20 @@ class OmniNavOnlineInference:
                         waypoints = waypoints.reshape(-1, 2)
                     if isinstance(recover_angles, np.ndarray) and recover_angles.ndim > 1:
                         recover_angles = recover_angles.flatten()
+                    if len(waypoints) > 0 and align_dx_target is not None and align_dy_target is not None:
+                        wp0_dx = float(waypoints[0][0])
+                        wp0_dy = float(waypoints[0][1])
+                        align_err_deg = self._angle_error_deg(
+                            align_dx_target, align_dy_target, wp0_dx, wp0_dy
+                        )
+                        if align_err_deg is not None:
+                            print(
+                                "[ALIGN] "
+                                f"subgoal_local[x,z]=({align_local_x:.4f},{align_local_z:.4f}) "
+                                f"target(dx,dy)=({align_dx_target:.4f},{align_dy_target:.4f}) "
+                                f"wp0(dx,dy)=({wp0_dx:.4f},{wp0_dy:.4f}) "
+                                f"angle_err={align_err_deg:.1f}deg"
+                            )
                     for subframe_idx in range(min(5, len(waypoints))):
                         dx = waypoints[subframe_idx][0] / PREDICT_SCALE
                         dy = waypoints[subframe_idx][1] / PREDICT_SCALE
@@ -463,7 +828,10 @@ class OmniNavOnlineInference:
                             'subframe_idx': subframe_idx,
                             'dx': float(dx), 'dy': float(dy), 'dtheta': float(dtheta),
                             'arrive': arrive,
-                            'infer_time_s': float(infer_time) if subframe_idx == 0 else 0.0
+                            'infer_time_s': float(infer_time) if subframe_idx == 0 else 0.0,
+                            'target_dx': float(align_dx_target) if (subframe_idx == 0 and align_dx_target is not None) else "",
+                            'target_dy': float(align_dy_target) if (subframe_idx == 0 and align_dy_target is not None) else "",
+                            'angle_error_deg': float(align_err_deg) if (subframe_idx == 0 and align_err_deg is not None) else "",
                         })
                     wp, dtheta0 = waypoints[0], np.degrees(recover_angles[0]) if len(recover_angles) > 0 else 0.0
                     print(f"  -> arrive={arrive}, dtheta={dtheta0:.2f}, wp[0]=({wp[0]:.4f}, {wp[1]:.4f})")
@@ -474,6 +842,17 @@ class OmniNavOnlineInference:
                     front_vis = draw_waypoint_arrows_fpv(front, waypoint_list)
                 else:
                     front_vis = front.copy()
+                if int(action.get('arrive_pred', 0)) != 0:
+                    cv2.putText(
+                        front_vis,
+                        "OK",
+                        (max(10, int(front_vis.shape[1] * 0.45)), max(30, int(front_vis.shape[0] * 0.12))),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
                 self.vis_frame_list.append((left.copy(), front_vis, right.copy()))
                 
                 if action.get('arrive_pred', 0) != 0:
@@ -500,7 +879,13 @@ class OmniNavOnlineInference:
             csv_file = os.path.join(self.result_path, f"waypoint_data_online_{timestamp}.csv")
             
             with open(csv_file, 'w', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=['frame_idx', 'subframe_idx', 'dx', 'dy', 'dtheta', 'arrive', 'infer_time_s'])
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        'frame_idx', 'subframe_idx', 'dx', 'dy', 'dtheta', 'arrive', 'infer_time_s',
+                        'target_dx', 'target_dy', 'angle_error_deg',
+                    ],
+                )
                 writer.writeheader()
                 writer.writerows(self.csv_records)
             
@@ -576,7 +961,7 @@ class OmniNavOnlineInference:
                 right_f = cv2.resize(right_f, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
             combined = np.concatenate([left_f, front_f, right_f], axis=1)
             # Add instruction bar below
-            frame_with_instruction = add_instruction_bar(combined, self.instruction)
+            frame_with_instruction = add_instruction_bar(combined, self.last_runtime_instruction)
             frame_bgr = cv2.cvtColor(frame_with_instruction, cv2.COLOR_RGB2BGR)
             video_writer.write(frame_bgr)
 
@@ -590,28 +975,74 @@ class OmniNavOnlineInference:
 def main():
     parser = argparse.ArgumentParser(description='OmniNav Real-time Inference')
     
-    parser.add_argument("--model-path", type=str, default="../OmniNav", help="OmniNav model path (default: ../OmniNav)")
-    parser.add_argument("--instruction", type=str, required=True, help="Navigation instruction")
+    parser.add_argument("--model-path", type=str, default="/workspace/OmniNav/OmniNav_Slowfast", help="OmniNav model path")
+    parser.add_argument("--instruction", type=str, default="", help="Navigation instruction (optional; if empty, subscribe from slow)")
     parser.add_argument("--result-path", type=str, default="./results", help="Result save path")
-    parser.add_argument("--inference-interval", type=float, default=1.0, help="Time between inferences in seconds (default: 1.0)")
+    parser.add_argument("--inference-interval", type=float, default=0.5, help="Time between inferences in seconds")
     parser.add_argument("--no-save-video", action="store_true", help="Disable video saving")
+    parser.add_argument("--pose-topic", type=str, default="/omni/pose2d", help="Pose topic (PoseStamped)")
+    parser.add_argument("--subgoal-topic", type=str, default="/omni/subgoal", help="Subgoal topic (PoseStamped)")
+    parser.add_argument("--instruction-topic", type=str, default="/omni/instruction", help="Instruction topic (String)")
+    parser.set_defaults(use_subgoal_hint=False, use_coordinate_tokens=True)
+    parser.add_argument("--no-subgoal-hint", dest="use_subgoal_hint", action="store_false", help="Disable subgoal text hint injection")
+    parser.add_argument("--use-subgoal-hint", dest="use_subgoal_hint", action="store_true", help="Enable subgoal text hint injection")
+    parser.add_argument("--use-coordinate-tokens", dest="use_coordinate_tokens", action="store_true", help="Enable coordinate-token conditioning (input_waypoints)")
+    parser.add_argument("--no-coordinate-tokens", dest="use_coordinate_tokens", action="store_false", help="Disable coordinate-token conditioning (input_waypoints)")
+    parser.add_argument("--max-camera-skew-ms", type=float, default=200.0, help="Max timestamp skew among front/left/right images")
+    parser.add_argument("--max-pose-dt-ms", type=float, default=150.0, help="Max |pose_stamp-image_stamp| for synced inference")
+    parser.add_argument("--max-subgoal-age-ms", type=float, default=5000.0, help="Max |subgoal_stamp-image_stamp| when using coordinate tokens")
+    parser.add_argument("--max-vis-frames", type=int, default=100, help="Keep only the latest N frames for MP4 saving")
     args = parser.parse_args()
+
+    # Auto-save console logs into result_path without requiring shell tee.
+    os.makedirs(args.result_path, exist_ok=True)
+    log_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_log_path = os.path.join(args.result_path, f"run_online_{log_ts}.log")
+    run_log_abs = os.path.abspath(run_log_path)
+    _orig_stdout = sys.stdout
+    _orig_stderr = sys.stderr
+    log_fp = open(run_log_path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = _TeeTextIO(_orig_stdout, log_fp)
+    sys.stderr = _TeeTextIO(_orig_stderr, log_fp)
+    print(f"[OmniNav Online] Runtime log file: {run_log_abs}")
 
     save_video = not args.no_save_video
 
-    inference = OmniNavOnlineInference(
-        model_path=args.model_path,
-        instruction=args.instruction,
-        result_path=args.result_path
-    )
-    inference.save_video = save_video
-    result_abs = os.path.abspath(args.result_path)
-    if save_video:
-        print(f"[OmniNav Online] Video saving enabled (MP4) -> will save to: {result_abs}")
-    else:
-        print("[OmniNav Online] Video saving disabled")
-    
-    inference.run_loop(inference_interval=args.inference_interval)
+    try:
+        inference = OmniNavOnlineInference(
+            model_path=args.model_path,
+            instruction=args.instruction,
+            result_path=args.result_path,
+            pose_topic=args.pose_topic,
+            subgoal_topic=args.subgoal_topic,
+            instruction_topic=args.instruction_topic,
+            use_subgoal_hint=args.use_subgoal_hint,
+            use_coordinate_tokens=args.use_coordinate_tokens,
+            max_vis_frames=args.max_vis_frames,
+            max_camera_skew_ms=args.max_camera_skew_ms,
+            max_pose_dt_ms=args.max_pose_dt_ms,
+            max_subgoal_age_ms=args.max_subgoal_age_ms,
+        )
+        inference.save_video = save_video
+        result_abs = os.path.abspath(args.result_path)
+        if save_video:
+            print(f"[OmniNav Online] Video saving enabled (MP4) -> will save to: {result_abs}")
+        else:
+            print("[OmniNav Online] Video saving disabled")
+
+        inference.run_loop(inference_interval=args.inference_interval)
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.stdout = _orig_stdout
+        sys.stderr = _orig_stderr
+        try:
+            log_fp.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
